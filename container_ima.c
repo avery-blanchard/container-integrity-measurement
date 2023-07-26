@@ -205,12 +205,16 @@ void __kprobes handler_post(struct kprobe *p, struct pt_regs *ctx, unsigned long
         unsigned long args;
         struct ima_max_digest_data hash;
         char *aggregate;
-        char ns_buf[128];
+        char ns_buf[128]; 
+
+	ns = current->nsproxy->uts_ns->ns.inum;
+	// do not measure host NS
+	if (ns == 4026531838)
+		return;
 
         aggregate = kmalloc(sizeof(aggregate)* 64, GFP_KERNEL);
 
         fs = current->fs;
-        ns = current->nsproxy->uts_ns->ns.inum;
 
         check = fs_traverse(fs->pwd.dentry->d_parent, ns, aggregate);
 
@@ -395,7 +399,7 @@ noinline int bpf_process_measurement(void *mem, int mem__sz)
 	struct file *file = data->file;
 	unsigned int ns = data->ns;
 	
-	if (!file)
+	if (!file || ns == 4026531838)
 		return 0;
 	
 	inode = file->f_inode;
