@@ -125,7 +125,6 @@ int ima_store_kprobe(unsigned int ns, char *agreggate, struct dentry *root, int 
 
         sprintf(name, "%u", ns);
 
-        pr_info("Name %s\n", name);
         /* IMA event data */
         struct ima_event_data event_data = { .iint = &iint,
                                              .filename = name
@@ -228,7 +227,6 @@ void __kprobes handler_post(struct kprobe *p, struct pt_regs *ctx, unsigned long
         if (check < 0)
                 return;
 
-        pr_info("namespaced hash %s", hash.hdr.digest);
         check = mutex_lock_killable(&tpm_mutex);
         ima_store_kprobe(ns, aggregate, fs->pwd.dentry->d_parent, 4, &hash, length);
 
@@ -444,13 +442,9 @@ static int container_ima_init(void)
 
 	/* Start container IMA */
 	int ret;
-	struct task_struct *task;
 	
 	pr_info("Starting Container IMA\n");
 
-
-	task = current;
-	host_inum = task->nsproxy->cgroup_ns->ns.inum;
 	
 	/* Register kernel module functions wiht libbpf */
 	ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_LSM, &bpf_ima_kfunc_set);
