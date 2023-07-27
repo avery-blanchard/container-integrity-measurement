@@ -1,8 +1,10 @@
 /*
- * Container IMA using eBPF
+ * Container IMA
  *
  * File: container_ima.c
- * 	Implements namespaced IMA measurements,
+ * 	Implements namespaced IMA measurements, 
+ * 	measurements of container images, 
+ * 	register/unregister kprobes,
  * 	defines kernel symbols, registers kfuncs
  * 	with libbpf
  */
@@ -45,15 +47,7 @@
 #include <linux/fs_struct.h>
 
 #include "container_ima.h"
-
 #define MODULE_NAME "ContainerIMA"
-extern void security_task_getsecid(struct task_struct *p, u32 *secid);
-extern const int hash_digest_size[HASH_ALGO__LAST];
-extern char *dentry_path_raw(const struct dentry *, char *, int);
-extern void unregister_kprobe(struct kprobe *p);
-
-static DEFINE_MUTEX(tpm_mutex);
-static struct kprobe **current_kprobe_ptr;
 
 #define preempt_enable_no_resched_notrace() \
 do { \
@@ -61,7 +55,16 @@ do { \
         __preempt_count_dec(); \
 } while (0)
 
+
+extern void security_task_getsecid(struct task_struct *p, u32 *secid);
+extern const int hash_digest_size[HASH_ALGO__LAST];
+extern char *dentry_path_raw(const struct dentry *, char *, int);
+extern void unregister_kprobe(struct kprobe *p);
+
+static DEFINE_MUTEX(tpm_mutex);
+static struct kprobe **current_kprobe_ptr;
 static char func_name[KSYM_NAME_LEN] = "ksys_unshare";
+
 void synchronize_sched(void)
 {
         RCU_LOCKDEP_WARN(lock_is_held(&rcu_bh_lock_map) ||
@@ -69,7 +72,15 @@ void synchronize_sched(void)
                          lock_is_held(&rcu_sched_lock_map),
                          "Illegal synchronize_sched() in RCU read-side critical section");
 }
-
+/*
+ * kprobe_measure_file
+ * 	struct file *file: file to measure
+ * 	char *aggregate: running hash value over image
+ *  
+ *	Measures file using ima_file_hash
+ *	Measurements are concatonated and re-hashed
+ *	with the prior file hashes for the image
+ */
 char *kprobe_measure_file(struct file *file, char *aggregate)
 {
 
@@ -96,9 +107,17 @@ char *kprobe_measure_file(struct file *file, char *aggregate)
 
 }
 
-/* Function might sleep, grab a lock 
+/*
+ * ima_store_kprobe
+ * 	unsigned int vs: namespace
+ * 	int hash_algo: algorithm used in measurement
+ * 	struct ima_max_digest_data *hash: hash information
+ * 	int length: size of hash data
+ *
+ * 	Store container image measurement in the IMA logs
+ * 	Extend to pcr 11
  */
-int ima_store_kprobe(unsigned int ns, char *agreggate, struct dentry *root, int hash_algo,
+int ima_store_kprobe(unsigned int ns, int hash_algo,
                 struct ima_max_digest_data *hash, int length)
 {
 
@@ -140,7 +159,6 @@ int ima_store_kprobe(unsigned int ns, char *agreggate, struct dentry *root, int 
         }
 
         /* Enable and protect task preemption, Store template, extend to PCR 11 */
-        //preempt_enable();
         preempt_enable_no_resched_notrace();
         mdelay(0);
         if (!in_task())
@@ -163,6 +181,14 @@ int ima_store_kprobe(unsigned int ns, char *agreggate, struct dentry *root, int 
         return check;
 
 }
+/* 
+ * fs_traverse
+ * 	struct dentry *root: root directory of namespace
+ * 	unsigned int ns: namespace
+ * 	char *aggregate: current hash value
+ *
+ * 	Traverse FS tree to measure all files
+ */
 int fs_traverse(struct dentry *root, unsigned int ns, char *aggregate)
 {
         struct dentry *cur;
@@ -197,7 +223,15 @@ int fs_traverse(struct dentry *root, unsigned int ns, char *aggregate)
         return 0;
 
 }
-
+/*
+ * handler_post
+ * 	struct kprobe *p
+ * 	struct pt_regs *ctx 
+ * 	unsigned long flags
+ *
+ * 	Unshare kprobe handler. Provokes collection and storage of container image
+ * 	measurement 
+ */
 void __kprobes handler_post(struct kprobe *p, struct pt_regs *ctx, unsigned long flags)
 {
         int check, length;
@@ -243,11 +277,11 @@ void __kprobes handler_post(struct kprobe *p, struct pt_regs *ctx, unsigned long
         return;
 }
 
-
 int __kprobes handler_pre(struct kprobe *p, struct pt_regs *regs)
 {
         return 0;
 }
+
 static struct kprobe unshare_probe = {
         .symbol_name = func_name,
 };
