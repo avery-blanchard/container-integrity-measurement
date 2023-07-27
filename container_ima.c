@@ -53,7 +53,7 @@ extern char *dentry_path_raw(const struct dentry *, char *, int);
 extern void unregister_kprobe(struct kprobe *p);
 
 static DEFINE_MUTEX(tpm_mutex);
-static struct kprobe **current_kprobe;
+static struct kprobe **current_kprobe_ptr;
 
 #define preempt_enable_no_resched_notrace() \
 do { \
@@ -145,7 +145,7 @@ int ima_store_kprobe(unsigned int ns, char *agreggate, struct dentry *root, int 
         mdelay(0);
         if (!in_task())
                 return 0;
-        *this_cpu_ptr(current_kprobe) = NULL;
+        *this_cpu_ptr(current_kprobe_ptr) = NULL;
 	check = ima_store_template(entry, 0, inode, name, 11);
         preempt_disable();
         if ((!check || check == -EEXIST)) {
@@ -543,8 +543,8 @@ static int container_ima_init(void)
                 return -1;
         }
 
-	current_kprobe = (struct kprobe **)  kallsyms_lookup_name("current_kprobe");
-	if (current_kprobe == NULL) {
+	current_kprobe_ptr = (struct kprobe **)  kallsyms_lookup_name("current_kprobe");
+	if (current_kprobe_ptr == NULL) {
 		pr_err("Lookup fails\n");
                 return -1;
         }
