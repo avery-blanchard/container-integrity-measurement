@@ -1,10 +1,9 @@
-# Container IMA using eBPF
+# Container Integrity Measurements
 
 ## Overview
-The goal of this project is to extend the Linux Integrity Measurement Architecture to Linux containers 
-without changes to the host operating system.
+This project implements the collection and storage of container image measurements and extends the Linux Integrity Measurement Architecture to Linux containers without changes to the host operating system.
 
-It uses the eBPF `mmap_file` LSM hook to add namespace support to IMA.
+It uses the eBPF `mmap_file` LSM hook to add namespace support to IMA and a kprobe into `unshare` to measure entire container images.
 
 ## Usage 
 Note: Machine must run a new kernel (v6+)
