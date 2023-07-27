@@ -50,6 +50,7 @@
 extern void security_task_getsecid(struct task_struct *p, u32 *secid);
 extern const int hash_digest_size[HASH_ALGO__LAST];
 extern char *dentry_path_raw(const struct dentry *, char *, int);
+extern void unregister_kprobe(struct kprobe *p);
 
 static DEFINE_MUTEX(tpm_mutex);
 
