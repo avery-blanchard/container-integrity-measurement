@@ -24,11 +24,17 @@ VMLINUX := vmlinux.h
 vmlinux.h:
 	$(BPFTOOL) btf dump file /sys/kernel/btf/vmlinux format c > $(OUTPUT)/vmlinux.h
 
+
+ifndef KVER
+KVER=$(shell uname -r)
+endif
+
+
 # Use our own libbpf API headers and Linux UAPI headers distributed with
 # libbpf to avoid dependency on system-wide headers, which could be missing or
 # outdated
 INCLUDES := -I$(OUTPUT) -I../libbpf/include/uapi -I$(dir $(VMLINUX))
-CFLAGS := -g -Wall
+ccflags-y := -g -Wno-error -Wall
 ALL_LDFLAGS := $(LDFLAGS) $(EXTRA_LDFLAGS)
 
 APPS = probe
@@ -122,9 +128,12 @@ $(APPS): %: $(OUTPUT)/%.o $(LIBBPF_OBJ) | $(OUTPUT)
 
 .PHONY: kmod
 kmod:
-	make COPTS=-g -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+	make COPTS=-g -C /lib/modules/$(KVER)/build  M=$(PWD) modules
 	LLVM_OBJCOPY=llvm-objcopy pahole -J --btf_gen_floats -j --btf_base /sys/kernel/btf/vmlinux container_ima.ko; \
 	/usr/lib/modules/$(shell uname -r)/build/tools/bpf/resolve_btfids/resolve_btfids -b /sys/kernel/btf/vmlinux container_ima.ko;
+	install -v -m 755 -d /lib/modules/$(KVER)/
+	install -v -m 644 container_ima.ko /lib/modules/$(KVER)/container_ima.c
+	depmod -F /lib/modules/$(KVER)/System.map $(KVER)
 
 .PHONY: kmod-clean
 kmod-clean:
