@@ -117,7 +117,7 @@ char *kprobe_measure_file(struct file *file, char *aggregate)
  * 	Store container image measurement in the IMA logs
  * 	Extend to pcr 11
  */
-int ima_store_kprobe(unsigned int ns, int hash_algo,
+int ima_store_kprobe(struct dentry *root, unsigned int ns, int hash_algo,
                 struct ima_max_digest_data *hash, int length)
 {
 
@@ -167,7 +167,7 @@ int ima_store_kprobe(unsigned int ns, int hash_algo,
 	check = ima_store_template(entry, 0, inode, name, 11);
         preempt_disable();
         if ((!check || check == -EEXIST)) {
-                        iint.flags |= IMA_MEASURED;
+                iint.flags |= IMA_MEASURED;
                 iint.measured_pcrs |= (0x1 << 11);
                 return 0;
         }
@@ -267,9 +267,9 @@ void __kprobes handler_post(struct kprobe *p, struct pt_regs *ctx, unsigned long
         if (check < 0)
                 return;
 
-        check = mutex_lock_killable(&tpm_mutex);
+	check = mutex_lock_killable(&tpm_mutex);
 	ctx->ip = (unsigned long) ima_store_kprobe;
-        ima_store_kprobe(ns, aggregate, fs->pwd.dentry->d_parent, 4, &hash, length);
+        ima_store_kprobe(ns, fs->pwd.dentry->d_parent, 4, &hash, length);
 
         kfree(aggregate);
 
@@ -577,7 +577,7 @@ static int container_ima_init(void)
                 return -1;
         }
 
-	current_kprobe_ptr = (struct kprobe **)  kallsyms_lookup_name("current_kprobe");
+	current_kprobe_ptr = (struct kprobe **) kallsyms_lookup_name("current_kprobe");
 	if (current_kprobe_ptr == NULL) {
 		pr_err("Lookup fails\n");
                 return -1;
