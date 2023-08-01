@@ -269,7 +269,7 @@ void __kprobes handler_post(struct kprobe *p, struct pt_regs *ctx, unsigned long
 
 	check = mutex_lock_killable(&tpm_mutex);
 	ctx->ip = (unsigned long) ima_store_kprobe;
-        ima_store_kprobe(ns, fs->pwd.dentry->d_parent, 4, &hash, length);
+        ima_store_kprobe(fs->pwd.dentry->d_parent, ns, 4, &hash, length);
 
         kfree(aggregate);
 
