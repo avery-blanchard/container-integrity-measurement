@@ -267,7 +267,7 @@ void __kprobes handler_post(struct kprobe *p, struct pt_regs *ctx, unsigned long
         if (check < 0)
                 return;
 
-	ctx->ip = (unsigned long) ima_store_template_entry;
+	ctx->ip = (unsigned long) ima_store_template;
         ima_store_kprobe(fs->pwd.dentry->d_parent, ns, 4, &hash, length);
 
         kfree(aggregate);
