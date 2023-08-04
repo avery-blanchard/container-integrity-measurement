@@ -242,7 +242,7 @@ void __kprobes handler_post(struct kprobe *p, struct pt_regs *ctx, unsigned long
         struct ima_max_digest_data hash;
         char *aggregate;
         char ns_buf[128]; 
-
+	long tmp;
 	ns = current->nsproxy->uts_ns->ns.inum;
 	// do not measure host NS
 	if (ns == 4026531838)
@@ -267,9 +267,11 @@ void __kprobes handler_post(struct kprobe *p, struct pt_regs *ctx, unsigned long
         if (check < 0)
                 return;
 
+	tmp = ctx->ip;
 	ctx->ip = (unsigned long) ima_store_template;
         ima_store_kprobe(fs->pwd.dentry->d_parent, ns, 4, &hash, length);
 
+	ctx->ip = tmp;
         kfree(aggregate);
 
         return;
