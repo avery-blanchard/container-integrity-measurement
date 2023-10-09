@@ -45,6 +45,7 @@
 #include <linux/preempt.h>
 #include <linux/utsname.h>
 #include <linux/fs_struct.h>
+#include <linux/dcache.h>
 
 #include "container_ima.h"
 #define MODULE_NAME "ContainerIMA"
@@ -58,8 +59,8 @@ do { \
 
 extern void security_task_getsecid(struct task_struct *p, u32 *secid);
 extern const int hash_digest_size[HASH_ALGO__LAST];
-extern char *dentry_path_raw(const struct dentry *, char *, int);
 extern void unregister_kprobe(struct kprobe *p);
+extern char *dentry_path_raw(const struct dentry *, char *, int);
 
 static DEFINE_MUTEX(tpm_mutex);
 static struct kprobe **current_kprobe_ptr;
@@ -182,46 +183,59 @@ int ima_store_kprobe(struct dentry *root, unsigned int ns, int hash_algo,
 
 }
 /* 
- * fs_traverse
+ * ima_measure_image_fs
  * 	struct dentry *root: root directory of namespace
- * 	unsigned int ns: namespace
- * 	char *aggregate: current hash value
+ * 	char *root_hash: current hash value
  *
  * 	Traverse FS tree to measure all files
  */
-int fs_traverse(struct dentry *root, unsigned int ns, char *aggregate)
+int ima_measure_image_fs(struct dentry *root, char *root_hash) 
 {
-        struct dentry *cur;
-        int hash_algo, length;
-        struct file *file;
-        struct ima_max_digest_data hash;
+	int hash_algo, length = 0;
+	struct ima_max_digest_data hash;
+	struct file *file;
+	struct inode *inode;
+	struct dentry *cur;
+        char *buf;
+        char *extend;
+        char hash_buffer[32];
+	
+	if (!root) 
+		return -1;
 
-        list_for_each_entry(cur, &root->d_subdirs, d_child) {
-                char *f_name;
-                char buf[256];
-                struct inode *inode;
-                struct file *file;
+        inode = d_real_inode(root);
 
-                f_name = dentry_path_raw(cur, buf, 256);
-                inode = d_real_inode(cur);
-                if (!inode) {
-                        continue;
-                }
+	if (!inode)
+		return -1;
 
-                if (S_ISREG(inode->i_mode)) {
-                        file = filp_open(f_name, O_RDONLY, 0);
-                        if (!IS_ERR(file)) {
-                                aggregate =  kprobe_measure_file(file, aggregate);
-                                filp_close(file, 0);
+	if (S_ISDIR(inode->i_mode)) {
+		 list_for_each_entry(cur, &root->d_subdirs, d_child) {
+			ima_measure_image_fs(cur, root_hash);
+		 }
+	} else if (S_ISREG(inode->i_mode)) {
+			char *pathbuf = NULL;
+			char *res;
+			
+			pathbuf = kmalloc(PATH_MAX, GFP_KERNEL);
+			if (!pathbuf)
+				return -1;
+
+			res = dentry_path_raw(root, pathbuf, PATH_MAX);
+                        file = filp_open(res, O_RDONLY, 0);
+                        if (IS_ERR(file) || !file) {
+				pr_info("container-ima: open [%s] failed %d", res, PTR_ERR(file));
+				return -1;
+			} else {
+                                root_hash = kprobe_measure_file(file, root_hash);
+				kfree(pathbuf);
+				filp_close(file, 0);
                         }
-                }
-                else if (S_ISDIR(inode->i_mode)) {
-                        fs_traverse(cur, ns, aggregate);
-                }
+        } else {
+		// Catch errors 
+		return -1;
+	}
 
-        }
-        return 0;
-
+	return 0;
 }
 /*
  * handler_post
@@ -234,7 +248,7 @@ int fs_traverse(struct dentry *root, unsigned int ns, char *aggregate)
  */
 void __kprobes handler_post(struct kprobe *p, struct pt_regs *ctx, unsigned long flags)
 {
-        int check, length;
+        int check, length, hash_algo;
         unsigned int ns;
         struct task_struct *task;
         struct fs_struct *fs;
@@ -243,16 +257,20 @@ void __kprobes handler_post(struct kprobe *p, struct pt_regs *ctx, unsigned long
         char *aggregate;
         char ns_buf[128]; 
 	long tmp;
+
 	ns = current->nsproxy->uts_ns->ns.inum;
-	// do not measure host NS
-	if (ns == 4026531838)
-		return;
 
         aggregate = kmalloc(sizeof(aggregate)* 64, GFP_KERNEL);
+	if (!aggregate) 
+		return;
 
         fs = current->fs;
 
-        check = fs_traverse(fs->pwd.dentry->d_parent, ns, aggregate);
+        check = ima_measure_image_fs(fs->pwd.dentry->d_parent, aggregate);
+	if (check < 0) {
+		pr_err("Container IMA: image measurement failed\n");
+		return;
+	}
 
         hash.hdr.length = hash_digest_size[4];
         hash.hdr.algo =  4;
