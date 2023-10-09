@@ -189,38 +189,48 @@ int ima_store_kprobe(struct dentry *root, unsigned int ns, int hash_algo,
  *
  * 	Traverse FS tree to measure all files
  */
-int fs_traverse(struct dentry *root, unsigned int ns, char *aggregate)
+int ima_measure_image_fs(struct dentry *root, char *root_hash, int algo) 
 {
-        struct dentry *cur;
-        int hash_algo, length;
-        struct file *file;
-        struct ima_max_digest_data hash;
+	int algo, length = 0;
+	struct ima_max_digest_data hash;
+	struct file *file;
+	struct inode *inode;
+	struct dentry *cur;
+	char *f_name;
+        char *buf;
+        char *extend;
+        char hash_buffer[32];
+	
+	if (!root) 
+		return algo;
 
-        list_for_each_entry(cur, &root->d_subdirs, d_child) {
-                char *f_name;
-                char buf[256];
-                struct inode *inode;
-                struct file *file;
+        f_name = dentry_path_raw(cur, buf, 256);
 
-                f_name = dentry_path_raw(cur, buf, 256);
-                inode = d_real_inode(cur);
-                if (!inode) {
-                        continue;
-                }
+        inode = d_real_inode(cur);
 
-                if (S_ISREG(inode->i_mode)) {
+	if (inode && S_ISDIR(inode->i_mode)) {
+		 list_for_each_entry(cur, &root->d_subdirs, d_child) {
+			ima_measure_image_fs(root, root_hash, algo);
+		 }
+	} else if  (S_ISREG(inode->i_mode)) {
                         file = filp_open(f_name, O_RDONLY, 0);
                         if (!IS_ERR(file)) {
-                                aggregate =  kprobe_measure_file(file, aggregate);
+                                hash_algo = ima_file_hash(file, hash_buffer, sizeof(hash_buffer));
+                                hash.hdr.length = hash_digest_size[hash_algo];
+                                hash.hdr.algo =  hash_algo;
+
+                                memset(&hash.digest, 0, sizeof(hash.digest));
+                                length = sizeof(hash.hdr) + hash.hdr.length;
+
+                                extend = strncat(root_hash, hash_buffer, hash.hdr.length);
+                                ima_calc_buffer_hash(extend, sizeof(extend), &hash.hdr);
+
+                                memcpy(root_hash, hash.digest,  hash_digest_size[hash_algo]);
+
                                 filp_close(file, 0);
                         }
-                }
-                else if (S_ISDIR(inode->i_mode)) {
-                        fs_traverse(cur, ns, aggregate);
-                }
-
         }
-        return 0;
+	return hash_algo;
 
 }
 /*
@@ -234,7 +244,7 @@ int fs_traverse(struct dentry *root, unsigned int ns, char *aggregate)
  */
 void __kprobes handler_post(struct kprobe *p, struct pt_regs *ctx, unsigned long flags)
 {
-        int check, length;
+        int check, length, hash_algo;
         unsigned int ns;
         struct task_struct *task;
         struct fs_struct *fs;
@@ -244,15 +254,12 @@ void __kprobes handler_post(struct kprobe *p, struct pt_regs *ctx, unsigned long
         char ns_buf[128]; 
 	long tmp;
 	ns = current->nsproxy->uts_ns->ns.inum;
-	// do not measure host NS
-	if (ns == 4026531838)
-		return;
 
         aggregate = kmalloc(sizeof(aggregate)* 64, GFP_KERNEL);
 
         fs = current->fs;
 
-        check = fs_traverse(fs->pwd.dentry->d_parent, ns, aggregate);
+        hash_algo = ima_measure_image_fs(fs->pwd.dentry->d_parent, aggregate);
 
         hash.hdr.length = hash_digest_size[4];
         hash.hdr.algo =  4;
