@@ -56,7 +56,6 @@ do { \
         __preempt_count_dec(); \
 } while (0)
 
-
 extern void security_task_getsecid(struct task_struct *p, u32 *secid);
 extern const int hash_digest_size[HASH_ALGO__LAST];
 extern void unregister_kprobe(struct kprobe *p);
@@ -189,54 +188,58 @@ int ima_store_kprobe(struct dentry *root, unsigned int ns, int hash_algo,
  *
  * 	Traverse FS tree to measure all files
  */
-int ima_measure_image_fs(struct dentry *root, char *root_hash) 
+int ima_measure_image_fs(struct dentry *root, char *pwd, char *root_hash) 
 {
 	int hash_algo, length = 0;
-	struct ima_max_digest_data hash;
 	struct file *file;
 	struct inode *inode;
 	struct dentry *cur;
-        char *buf;
-        char *extend;
-        char hash_buffer[32];
-	
+	char *pathbuf = NULL;
+        char *res = NULL;
+	char abspath[PATH_MAX*2];
+
 	if (!root) 
 		return -1;
 
         inode = d_real_inode(root);
-
 	if (!inode)
 		return -1;
+	
+	if (!pwd)
+		return -1;
 
+        pathbuf = kmalloc(PATH_MAX, GFP_KERNEL);
+        if (!pathbuf) 
+              return -1;
+       pr_info("dentry name: %s", root->d_name.name); 
+
+       res = dentry_abspath(root, pathbuf, PATH_MAX);
+        pr_info("[dentry_path_raw]: return value%s, pathbuf%s", res, pathbuf);
+	if (IS_ERR(res) || !res) {
+		pr_err("container-ima: dentry_path_raw failed to retrieve path");
+		return -1;
+	}
+
+	sprintf(abspath, "%s%s", pwd, res);
+	pr_info("RESULT CAT %s", abspath);
 	if (S_ISDIR(inode->i_mode)) {
 		 list_for_each_entry(cur, &root->d_subdirs, d_child) {
-			ima_measure_image_fs(cur, root_hash);
+			ima_measure_image_fs(cur, pwd, root_hash);
 		 }
 	} else if (S_ISREG(inode->i_mode)) {
-			char *pathbuf = NULL;
-			char *res;
-			
-			pathbuf = kmalloc(PATH_MAX, GFP_KERNEL);
-			if (!pathbuf) {
-				return -1;
-			}
-
-			res = dentry_path_raw(root, pathbuf, PATH_MAX);
-                        file = filp_open(res, O_RDONLY, 0);
+                        pr_info("Measuring %s", abspath);
+			file = filp_open(abspath, O_RDONLY, 0);
                         if (IS_ERR(file) || !file) {
 				pr_info("container-ima: open [%s] failed %d", res, PTR_ERR(file));
 				kfree(pathbuf);
 				return -1;
 			} else {
                                 root_hash = kprobe_measure_file(file, root_hash);
-				kfree(pathbuf);
 				filp_close(file, 0);
                         }
-        } else {
-		// Catch errors 
-		return -1;
 	}
 
+	kfree(pathbuf);
 	return 0;
 
 }
@@ -260,20 +263,50 @@ void __kprobes handler_post(struct kprobe *p, struct pt_regs *ctx, unsigned long
         char *aggregate;
         char ns_buf[128]; 
 	long tmp;
+	char *pathbuf;
+	char *res;
 
 	ns = current->nsproxy->uts_ns->ns.inum;
 
         aggregate = kmalloc(sizeof(aggregate)* 64, GFP_KERNEL);
-	if (!aggregate) 
-		return;
-
-        fs = current->fs;
-
-        check = ima_measure_image_fs(fs->pwd.dentry->d_parent, aggregate);
-	if (check < 0) {
-		pr_err("Container IMA: image measurement failed\n");
+	if (!aggregate) {
+		 pr_info("container-ima: allocation failed");
 		return;
 	}
+
+	pathbuf = kmalloc(PATH_MAX, GFP_KERNEL);
+        if (!pathbuf) {
+	      pr_info("container-ima: allocation failed");
+              return;
+	}
+
+
+	res = kmalloc(PATH_MAX, GFP_KERNEL);
+        if (!res) {
+              pr_info("container-ima: allocation failed");
+              return;
+        }
+	fs = current->fs;
+	res = d_path(&fs->pwd, pathbuf, PATH_MAX);
+	if (IS_ERR(res)){
+	        pr_err("Container IMA: absolute path fails \n");
+                kfree(res);
+                kfree(pathbuf);
+                return;	
+	}	
+	pr_info("Measuring container %s, %s", res, pathbuf);
+
+
+        check = ima_measure_image_fs(fs->pwd.dentry->d_parent, res, aggregate);
+	if (check < 0) {
+		pr_err("Container IMA: image measurement failed\n");
+		kfree(res);
+		kfree(pathbuf);
+		return;
+	}
+
+	kfree(pathbuf);
+	kfree(res);
 
         hash.hdr.length = hash_digest_size[4];
         hash.hdr.algo =  4;
@@ -569,7 +602,14 @@ static int container_ima_init(void)
                 pr_err("Lookup fails\n");
                 return -1;
         }
-	
+
+	dentry_abspath = (char *(*)(const struct dentry *dentry, char *buf, int buflen))
+			kallsyms_lookup_name("dentry_path");
+	if (dentry_abspath == 0) {
+    		pr_err("Lookup fails\n");
+                return -1;
+        }
+
 	ima_get_action = (int (*)(struct mnt_idmap *, struct inode *, 
 				const struct cred *, u32,  int,  
 				enum ima_hooks,  int *, 
