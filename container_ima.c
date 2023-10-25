@@ -190,13 +190,13 @@ int ima_store_kprobe(struct dentry *root, unsigned int ns, int hash_algo,
  */
 int ima_measure_image_fs(struct dentry *root, char *pwd, char *root_hash) 
 {
-	int hash_algo, length = 0;
+	int check;
 	struct file *file;
 	struct inode *inode;
 	struct dentry *cur;
 	char *pathbuf = NULL;
         char *res = NULL;
-	char abspath[PATH_MAX*2];
+	char *abspath;
 
 	if (!root) 
 		return -1;
@@ -211,35 +211,44 @@ int ima_measure_image_fs(struct dentry *root, char *pwd, char *root_hash)
         pathbuf = kmalloc(PATH_MAX, GFP_KERNEL);
         if (!pathbuf) 
               return -1;
-       pr_info("dentry name: %s", root->d_name.name); 
 
-       res = dentry_abspath(root, pathbuf, PATH_MAX);
-        pr_info("[dentry_path_raw]: return value%s, pathbuf%s", res, pathbuf);
+       	res = dentry_abspath(root, pathbuf, PATH_MAX);
 	if (IS_ERR(res) || !res) {
 		pr_err("container-ima: dentry_path_raw failed to retrieve path");
 		return -1;
 	}
+	kfree(pathbuf);
 
-	sprintf(abspath, "%s%s", pwd, res);
-	pr_info("RESULT CAT %s", abspath);
+	abspath = kmalloc(PATH_MAX*2, GFP_KERNEL);
+        if (!abspath)
+              return -1;
+	//strcat(abspath, res);
+	check = snprintf(abspath,(strlen(pwd)+strlen(res))+2, "%s%s", pwd, res);
+	if (check < 1) {
+		pr_err("container-ima: sprintf failed");
+		return -1;
+	}
 	if (S_ISDIR(inode->i_mode)) {
-		 list_for_each_entry(cur, &root->d_subdirs, d_child) {
+		 pr_info("Recursing on directory: %s",abspath);	
+	       	list_for_each_entry(cur, &root->d_subdirs, d_child) {
 			ima_measure_image_fs(cur, pwd, root_hash);
 		 }
 	} else if (S_ISREG(inode->i_mode)) {
-                        pr_info("Measuring %s", abspath);
+                        pr_info("Measuring file %s", abspath);
 			file = filp_open(abspath, O_RDONLY, 0);
                         if (IS_ERR(file) || !file) {
 				pr_info("container-ima: open [%s] failed %d", res, PTR_ERR(file));
 				kfree(pathbuf);
+				kfree(abspath);
 				return -1;
 			} else {
                                 root_hash = kprobe_measure_file(file, root_hash);
 				filp_close(file, 0);
                         }
 	}
-
 	kfree(pathbuf);
+        kfree(abspath);
+	
 	return 0;
 
 }
@@ -294,7 +303,7 @@ void __kprobes handler_post(struct kprobe *p, struct pt_regs *ctx, unsigned long
                 kfree(pathbuf);
                 return;	
 	}	
-	pr_info("Measuring container %s, %s", res, pathbuf);
+	pr_info("Measuring container %s", res);
 
 
         check = ima_measure_image_fs(fs->pwd.dentry->d_parent, res, aggregate);
