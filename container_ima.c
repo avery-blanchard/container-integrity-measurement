@@ -46,6 +46,8 @@
 #include <linux/utsname.h>
 #include <linux/fs_struct.h>
 #include <linux/dcache.h>
+#include <linux/nsproxy.h>
+#include <linux/init_task.h>
 
 #include "container_ima.h"
 #define MODULE_NAME "ContainerIMA"
@@ -60,6 +62,7 @@ extern void security_task_getsecid(struct task_struct *p, u32 *secid);
 extern const int hash_digest_size[HASH_ALGO__LAST];
 extern void unregister_kprobe(struct kprobe *p);
 extern char *dentry_path_raw(const struct dentry *, char *, int);
+extern struct nsproxy init_nsproxy;
 
 static DEFINE_MUTEX(tpm_mutex);
 static struct kprobe **current_kprobe_ptr;
@@ -190,7 +193,7 @@ int ima_store_kprobe(struct dentry *root, unsigned int ns, int hash_algo,
  */
 int ima_measure_image_fs(struct dentry *root, char *pwd, char *root_hash) 
 {
-	int check;
+	int check, length;
 	struct file *file;
 	struct inode *inode;
 	struct dentry *cur;
@@ -205,9 +208,6 @@ int ima_measure_image_fs(struct dentry *root, char *pwd, char *root_hash)
 	if (!inode)
 		return -1;
 	
-	if (!pwd)
-		return -1;
-
         pathbuf = kmalloc(PATH_MAX, GFP_KERNEL);
         if (!pathbuf) 
               return -1;
@@ -222,12 +222,17 @@ int ima_measure_image_fs(struct dentry *root, char *pwd, char *root_hash)
 	abspath = kmalloc(PATH_MAX*2, GFP_KERNEL);
         if (!abspath)
               return -1;
-	//strcat(abspath, res);
-	check = snprintf(abspath,(strlen(pwd)+strlen(res))+2, "%s%s", pwd, res);
+
+	if (pwd[strlen(pwd)-1] == '/')
+		pwd[strlen(pwd)-1] = '\0';
+	
+	length = (strlen(pwd)+strlen(res))+2;
+	check = snprintf(abspath, length, "%s%s", pwd, res);
 	if (check < 1) {
 		pr_err("container-ima: sprintf failed");
 		return -1;
 	}
+	
 	if (S_ISDIR(inode->i_mode)) {
 		 pr_info("Recursing on directory: %s",abspath);	
 	       	list_for_each_entry(cur, &root->d_subdirs, d_child) {
@@ -236,17 +241,11 @@ int ima_measure_image_fs(struct dentry *root, char *pwd, char *root_hash)
 	} else if (S_ISREG(inode->i_mode)) {
                         pr_info("Measuring file %s", abspath);
 			file = filp_open(abspath, O_RDONLY, 0);
-                        if (IS_ERR(file) || !file) {
-				pr_info("container-ima: open [%s] failed %d", res, PTR_ERR(file));
-				kfree(pathbuf);
-				kfree(abspath);
-				return -1;
-			} else {
+                        if (!IS_ERR(file) || file) {
                                 root_hash = kprobe_measure_file(file, root_hash);
 				filp_close(file, 0);
                         }
 	}
-	kfree(pathbuf);
         kfree(abspath);
 	
 	return 0;
@@ -276,6 +275,9 @@ void __kprobes handler_post(struct kprobe *p, struct pt_regs *ctx, unsigned long
 	char *res;
 
 	ns = current->nsproxy->uts_ns->ns.inum;
+	
+	if (ns == init_task.nsproxy->uts_ns->ns.inum) 
+		return;
 
         aggregate = kmalloc(sizeof(aggregate)* 64, GFP_KERNEL);
 	if (!aggregate) {
@@ -302,7 +304,10 @@ void __kprobes handler_post(struct kprobe *p, struct pt_regs *ctx, unsigned long
                 kfree(res);
                 kfree(pathbuf);
                 return;	
-	}	
+	}
+ pr_info("Measuring container %s", res);
+	if (res[strlen(res-1)] == '/')
+		res[strlen(res)-1] = '\0';
 	pr_info("Measuring container %s", res);
 
 
