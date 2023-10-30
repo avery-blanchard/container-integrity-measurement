@@ -252,8 +252,9 @@ struct integrity_iint_cache {
 };
 
 struct ebpf_data {
-        struct file *file;
-        unsigned int ns;
+        struct dentry *root;
+	struct path *pwd;
+	unsigned int ns;
 };
 
 struct ima_max_digest_data {

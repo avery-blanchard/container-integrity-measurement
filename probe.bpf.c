@@ -1,48 +1,70 @@
 #include "vmlinux.h"
+#include <linux/bpf.h>
+#include <linux/capability.h>
+#include <linux/errno.h>
+#include <linux/sched.h>
+#include <linux/types.h>
+
 #include <bpf/bpf_tracing.h>
-#include <bpf/bpf_core_read.h>
 #include <bpf/bpf_helpers.h>
+#include <bpf/bpf_core_read.h>
+
+#define X86_64_UNSHARE_SYSCALL 272
+#define UNSHARE_SYSCALL X86_64_UNSHARE_SYSCALL
 #include <string.h>
 
 #define bpf_target_x86
 #define bpf_target_defined
-#define PROT_EXEC 0x04
 
 char _license[] SEC("license") = "GPL";
 
 struct ebpf_data {
-        struct file *file;
-        unsigned int ns;
+        struct dentry *root;
+	struct path *pwd;
+	unsigned int ns;
 };
+struct pt_regs {
+	long unsigned int di;
+	long unsigned int orig_ax;
+} __attribute__((preserve_access_index));
 
-extern int bpf_process_measurement(void *, int) __ksym;
+extern int bpf_image_measure(void *, int) __ksym;
 extern int measure_file(struct file *) __ksym;
 
-SEC("lsm.s/mmap_file")
-int BPF_PROG(mmap_hook, struct file *file, unsigned int reqprot, 
-		unsigned int prot, int flags) 
+SEC("lsm.s/cred_prepare")
+int BPF_PROG(unshare_hook, struct cred *new, const struct cred *old,
+             gfp_t gfp, int ret)
 {
     struct task_struct *task;
-    u32 key;
+    struct dentry *root;
+    struct path *pwd;
     unsigned int ns;
-    int ret;
+    struct pt_regs *regs;
+    int syscall;
+    unsigned long flags;
 
-    if (!file) 
-	return 0;
-    
-    if (prot & PROT_EXEC || reqprot & PROT_EXEC) {
-	
+    regs = (struct pt_regs *) bpf_task_pt_regs(task);
+    syscall = regs->orig_ax;
+
+    if (syscall == UNSHARE_SYSCALL) {
+
+flags = PT_REGS_PARM1_CORE(regs);
+
+    /* Filter on flags
+    	if (!(flags & CLONE_NEWUSER)) {
+        	return 0;
+    	}	*/
 	task = (void *) bpf_get_current_task();
         ns = BPF_CORE_READ(task, nsproxy, uts_ns, ns.inum);
+	path = BPF_CORE_READ(task,fs,pwd);
+	root = BPF_CORE_READ(task,fs, pwd.dentry, d_parent);
+	struct ebpf_data data = { .root = root, .pwd = pwd, .ns = ns };
 	
-	struct ebpf_data data = { .file = file, .ns = ns };
-	
-	ret = bpf_process_measurement((void *) &data, 
+	ret = bpf_image_measure((void *) &data, 
 			sizeof(&data));
 
 
     }
-
     
     return 0;
 
