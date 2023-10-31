@@ -223,7 +223,8 @@ noinline int ima_measure_image_fs(struct dentry *root, char *pwd, char *root_has
 		return -1;
 	}
 	kfree(pathbuf);
-
+	/*
+	// Docker: get abs path 
 	abspath = kmalloc(PATH_MAX*2, GFP_KERNEL);
         if (!abspath)
               return -1;
@@ -236,7 +237,7 @@ noinline int ima_measure_image_fs(struct dentry *root, char *pwd, char *root_has
 	if (check < 1) {
 		pr_err("container-ima: sprintf failed");
 		return -1;
-	}
+	}*/
 	
 	if (S_ISDIR(inode->i_mode)) {
 	       	list_for_each_entry(cur, &root->d_subdirs, d_child) {
@@ -245,11 +246,10 @@ noinline int ima_measure_image_fs(struct dentry *root, char *pwd, char *root_has
 	} else if (S_ISREG(inode->i_mode)) {
 			file = filp_open(res, O_RDONLY, 0);
 			if (IS_ERR(file) || !file) {
-				pr_info("container-ima: failed to open %s", abspath);
 				kfree(abspath);
 				return -1;
 			} else {
-				pr_info("Measuring %s", abspath);
+				pr_info("Measuring %s", res);
                                 root_hash = kprobe_measure_file(file, root_hash);
 				filp_close(file, 0);
                         }
@@ -286,8 +286,8 @@ noinline int bpf_image_measure(void *mem, int mem__sz)
 	char *res;
 
 	
-	//if (ns == init_task.nsproxy->uts_ns->ns.inum) 
-	//	return;
+	if (ns == init_task.nsproxy->uts_ns->ns.inum) 
+		return 0;
 
         aggregate = kmalloc(sizeof(aggregate)* 64, GFP_KERNEL);
 	if (!aggregate) {
@@ -302,50 +302,40 @@ noinline int bpf_image_measure(void *mem, int mem__sz)
 	}
 
 
-	res = kmalloc(PATH_MAX, GFP_KERNEL);
-        if (!res) {
-              pr_info("container-ima: allocation failed");
-              return 0;
-        }
 	fs = current->fs;
 	res = d_path(pwd, pathbuf, PATH_MAX);
 	if (IS_ERR(res)){
 	        pr_err("Container IMA: absolute path fails \n");
-                kfree(res);
-                kfree(pathbuf);
-                return 0;	
+		goto cleanup;
 	}
+
+	if (!(strstr(res, "overlay")))
+		goto cleanup;
 	pr_info("Measuring container %s", res);
 
 
-        check = -1;// ima_measure_image_fs(root, res, aggregate);
+        check = ima_measure_image_fs(root, res, aggregate);
 	if (check < 0) {
 		pr_err("Container IMA: image measurement failed\n");
-		kfree(res);
-		kfree(pathbuf);
-		return 0;
+		goto cleanup;
 	}
 
-	kfree(pathbuf);
-	kfree(res);
 
         hash.hdr.length = hash_digest_size[4];
         hash.hdr.algo =  4;
         memset(&hash.digest, 0, sizeof(hash.digest));
         length = sizeof(hash.hdr) + hash.hdr.length;
 
-        sprintf(ns_buf, "%u", ns);
-        aggregate = strncat(aggregate, ns_buf, 32);
-
 
         check = ima_calc_buffer_hash(aggregate, sizeof(aggregate), &hash.hdr);
         if (check < 0)
-                return 0;
+		goto cleanup;
 
         ima_store_kprobe(root, ns, 4, &hash, length);
 
-
+cleanup:
         kfree(aggregate);
+	kfree(pathbuf);
 
         return 0;
 }
@@ -490,4 +480,5 @@ module_exit(container_ima_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION(MODULE_NAME);
 MODULE_AUTHOR("Avery Blanchard");
+
 
