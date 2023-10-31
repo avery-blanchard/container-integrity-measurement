@@ -53,29 +53,12 @@
 #include "container_ima.h"
 #define MODULE_NAME "ContainerIMA"
 
-#define preempt_enable_no_resched_notrace() \
-do { \
-        barrier(); \
-        __preempt_count_dec(); \
-} while (0)
-
 extern void security_task_getsecid(struct task_struct *p, u32 *secid);
 extern const int hash_digest_size[HASH_ALGO__LAST];
 extern void unregister_kprobe(struct kprobe *p);
 extern char *dentry_path_raw(const struct dentry *, char *, int);
 extern struct nsproxy init_nsproxy;
 
-static DEFINE_MUTEX(tpm_mutex);
-static struct kprobe **current_kprobe_ptr;
-static char func_name[KSYM_NAME_LEN] = "ksys_unshare";
-
-void synchronize_sched(void)
-{
-        RCU_LOCKDEP_WARN(lock_is_held(&rcu_bh_lock_map) ||
-                         lock_is_held(&rcu_lock_map) ||
-                         lock_is_held(&rcu_sched_lock_map),
-                         "Illegal synchronize_sched() in RCU read-side critical section");
-}
 /*
  * kprobe_measure_file
  * 	struct file *file: file to measure
@@ -110,7 +93,6 @@ noinline char *kprobe_measure_file(struct file *file, char *aggregate)
 
         memcpy(aggregate, hash.digest, 32);
 
-	pr_info("MEASURED");
         return aggregate;
 
 }
@@ -167,13 +149,7 @@ noinline int ima_store_kprobe(struct dentry *root, unsigned int ns, int hash_alg
         }
 
         /* Enable and protect task preemption, Store template, extend to PCR 11 */
-        preempt_enable_no_resched_notrace();
-        mdelay(0);
-        if (!in_task())
-                return 0;
-        *this_cpu_ptr(current_kprobe_ptr) = NULL;
 	check = ima_store_template(entry, 0, inode, name, 11);
-        preempt_disable();
         if ((!check || check == -EEXIST)) {
                 iint.flags |= IMA_MEASURED;
                 iint.measured_pcrs |= (0x1 << 11);
@@ -217,14 +193,14 @@ noinline int ima_measure_image_fs(struct dentry *root, char *pwd, char *root_has
         if (!pathbuf) 
               return -1;
 
-       	res = dentry_abspath(root, pathbuf, PATH_MAX);
+       	res = dentry_path_raw(root, pathbuf, PATH_MAX);
 	if (IS_ERR(res) || !res) {
 		pr_err("container-ima: dentry_path_raw failed to retrieve path");
 		return -1;
 	}
 	kfree(pathbuf);
-	/*
-	// Docker: get abs path 
+	
+	/* Docker: get abs path (pwd+dentry path) */
 	abspath = kmalloc(PATH_MAX*2, GFP_KERNEL);
         if (!abspath)
               return -1;
@@ -237,19 +213,14 @@ noinline int ima_measure_image_fs(struct dentry *root, char *pwd, char *root_has
 	if (check < 1) {
 		pr_err("container-ima: sprintf failed");
 		return -1;
-	}*/
-	
+	}
 	if (S_ISDIR(inode->i_mode)) {
 	       	list_for_each_entry(cur, &root->d_subdirs, d_child) {
 			ima_measure_image_fs(cur, pwd, root_hash);
 		 }
 	} else if (S_ISREG(inode->i_mode)) {
-			file = filp_open(res, O_RDONLY, 0);
-			if (IS_ERR(file) || !file) {
-				kfree(abspath);
-				return -1;
-			} else {
-				pr_info("Measuring %s", res);
+			file = filp_open(abspath, O_RDONLY, 0);
+			if (!(IS_ERR(file))) {
                                 root_hash = kprobe_measure_file(file, root_hash);
 				filp_close(file, 0);
                         }
@@ -257,6 +228,7 @@ noinline int ima_measure_image_fs(struct dentry *root, char *pwd, char *root_has
         kfree(abspath);
 	
 	return 0;
+
 
 }
 /*
@@ -311,7 +283,6 @@ noinline int bpf_image_measure(void *mem, int mem__sz)
 
 	if (!(strstr(res, "overlay")))
 		goto cleanup;
-	pr_info("Measuring container %s", res);
 
 
         check = ima_measure_image_fs(root, res, aggregate);
@@ -457,19 +428,12 @@ static int container_ima_init(void)
                 return -1;
         }
 
-	current_kprobe_ptr = (struct kprobe **) kallsyms_lookup_name("current_kprobe");
-	if (current_kprobe_ptr == NULL) {
-		pr_err("Lookup fails\n");
-                return -1;
-        }
-
 	return 0;
 }
 
 static void container_ima_exit(void)
 {
 	pr_info("Exiting Container IMA\n");
-	synchronize_sched();
 	return;
 }
 
