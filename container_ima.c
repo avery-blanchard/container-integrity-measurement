@@ -46,33 +46,19 @@
 #include <linux/utsname.h>
 #include <linux/fs_struct.h>
 #include <linux/dcache.h>
+#include <linux/nsproxy.h>
+#include <linux/init_task.h>
+#include <linux/syscalls.h>
 
 #include "container_ima.h"
 #define MODULE_NAME "ContainerIMA"
-
-#define preempt_enable_no_resched_notrace() \
-do { \
-        barrier(); \
-        __preempt_count_dec(); \
-} while (0)
-
 
 extern void security_task_getsecid(struct task_struct *p, u32 *secid);
 extern const int hash_digest_size[HASH_ALGO__LAST];
 extern void unregister_kprobe(struct kprobe *p);
 extern char *dentry_path_raw(const struct dentry *, char *, int);
+extern struct nsproxy init_nsproxy;
 
-static DEFINE_MUTEX(tpm_mutex);
-static struct kprobe **current_kprobe_ptr;
-static char func_name[KSYM_NAME_LEN] = "ksys_unshare";
-
-void synchronize_sched(void)
-{
-        RCU_LOCKDEP_WARN(lock_is_held(&rcu_bh_lock_map) ||
-                         lock_is_held(&rcu_lock_map) ||
-                         lock_is_held(&rcu_sched_lock_map),
-                         "Illegal synchronize_sched() in RCU read-side critical section");
-}
 /*
  * kprobe_measure_file
  * 	struct file *file: file to measure
@@ -82,7 +68,7 @@ void synchronize_sched(void)
  *	Measurements are concatonated and re-hashed
  *	with the prior file hashes for the image
  */
-char *kprobe_measure_file(struct file *file, char *aggregate)
+noinline char *kprobe_measure_file(struct file *file, char *aggregate)
 {
 
         int length, check, hash_algo;
@@ -90,9 +76,12 @@ char *kprobe_measure_file(struct file *file, char *aggregate)
         char *extend;
         struct ima_max_digest_data hash;
 
-
         hash_algo = ima_file_hash(file, buf, sizeof(buf));
-        hash.hdr.length = hash_digest_size[hash_algo];
+	if (hash_algo < 0) {
+		pr_err("container-ima: ima_file_hash returns error");
+		return aggregate;
+	}
+	hash.hdr.length = hash_digest_size[hash_algo];
         hash.hdr.algo =  hash_algo;
         memset(&hash.digest, 0, sizeof(hash.digest));
 
@@ -118,7 +107,7 @@ char *kprobe_measure_file(struct file *file, char *aggregate)
  * 	Store container image measurement in the IMA logs
  * 	Extend to pcr 11
  */
-int ima_store_kprobe(struct dentry *root, unsigned int ns, int hash_algo,
+noinline int ima_store_kprobe(struct dentry *root, unsigned int ns, int hash_algo,
                 struct ima_max_digest_data *hash, int length)
 {
 
@@ -160,13 +149,7 @@ int ima_store_kprobe(struct dentry *root, unsigned int ns, int hash_algo,
         }
 
         /* Enable and protect task preemption, Store template, extend to PCR 11 */
-        preempt_enable_no_resched_notrace();
-        mdelay(0);
-        if (!in_task())
-                return 0;
-        *this_cpu_ptr(current_kprobe_ptr) = NULL;
 	check = ima_store_template(entry, 0, inode, name, 11);
-        preempt_disable();
         if ((!check || check == -EEXIST)) {
                 iint.flags |= IMA_MEASURED;
                 iint.measured_pcrs |= (0x1 << 11);
@@ -189,55 +172,63 @@ int ima_store_kprobe(struct dentry *root, unsigned int ns, int hash_algo,
  *
  * 	Traverse FS tree to measure all files
  */
-int ima_measure_image_fs(struct dentry *root, char *root_hash) 
+noinline int ima_measure_image_fs(struct dentry *root, char *pwd, char *root_hash) 
 {
-	int hash_algo, length = 0;
-	struct ima_max_digest_data hash;
+	int check, length;
 	struct file *file;
 	struct inode *inode;
 	struct dentry *cur;
-        char *buf;
-        char *extend;
-        char hash_buffer[32];
-	
+	char *pathbuf = NULL;
+        char *res = NULL;
+	char *abspath;
+
 	if (!root) 
 		return -1;
 
         inode = d_real_inode(root);
-
 	if (!inode)
 		return -1;
+	
+        pathbuf = kmalloc(PATH_MAX, GFP_KERNEL);
+        if (!pathbuf) 
+              return -1;
 
-	if (S_ISDIR(inode->i_mode)) {
-		 list_for_each_entry(cur, &root->d_subdirs, d_child) {
-			ima_measure_image_fs(cur, root_hash);
-		 }
-	} else if (S_ISREG(inode->i_mode)) {
-			char *pathbuf = NULL;
-			char *res;
-			
-			pathbuf = kmalloc(PATH_MAX, GFP_KERNEL);
-			if (!pathbuf) {
-				return -1;
-			}
-
-			res = dentry_path_raw(root, pathbuf, PATH_MAX);
-                        file = filp_open(res, O_RDONLY, 0);
-                        if (IS_ERR(file) || !file) {
-				pr_info("container-ima: open [%s] failed %d", res, PTR_ERR(file));
-				kfree(pathbuf);
-				return -1;
-			} else {
-                                root_hash = kprobe_measure_file(file, root_hash);
-				kfree(pathbuf);
-				filp_close(file, 0);
-                        }
-        } else {
-		// Catch errors 
+       	res = dentry_path_raw(root, pathbuf, PATH_MAX);
+	if (IS_ERR(res) || !res) {
+		pr_err("container-ima: dentry_path_raw failed to retrieve path");
 		return -1;
 	}
+	kfree(pathbuf);
+	
+	/* Docker: get abs path (pwd+dentry path) */
+	abspath = kmalloc(PATH_MAX*2, GFP_KERNEL);
+        if (!abspath)
+              return -1;
 
+	if (pwd[strlen(pwd)-1] == '/')
+		pwd[strlen(pwd)-1] = '\0';
+	
+	length = (strlen(pwd)+strlen(res))+2;
+	check = snprintf(abspath, length, "%s%s", pwd, res);
+	if (check < 1) {
+		pr_err("container-ima: sprintf failed");
+		return -1;
+	}
+	if (S_ISDIR(inode->i_mode)) {
+	       	list_for_each_entry(cur, &root->d_subdirs, d_child) {
+			ima_measure_image_fs(cur, pwd, root_hash);
+		 }
+	} else if (S_ISREG(inode->i_mode)) {
+			file = filp_open(abspath, O_RDONLY, 0);
+			if (!(IS_ERR(file))) {
+                                root_hash = kprobe_measure_file(file, root_hash);
+				filp_close(file, 0);
+                        }
+	}
+        kfree(abspath);
+	
 	return 0;
+
 
 }
 /*
@@ -249,250 +240,82 @@ int ima_measure_image_fs(struct dentry *root, char *root_hash)
  * 	Unshare kprobe handler. Provokes collection and storage of container image
  * 	measurement 
  */
-void __kprobes handler_post(struct kprobe *p, struct pt_regs *ctx, unsigned long flags)
+noinline int bpf_image_measure(void *mem, int mem__sz)
 {
         int check, length, hash_algo;
-        unsigned int ns;
         struct task_struct *task;
         struct fs_struct *fs;
         unsigned long args;
         struct ima_max_digest_data hash;
         char *aggregate;
         char ns_buf[128]; 
+	struct ebpf_data *data = (struct ebpf_data *) mem;
+	struct dentry *root = data->root;
+	struct path *pwd = data->pwd;
+	unsigned int ns = data->ns;
 	long tmp;
+	char *pathbuf;
+	char *res;
 
-	ns = current->nsproxy->uts_ns->ns.inum;
+	
+	if (ns == init_task.nsproxy->uts_ns->ns.inum) 
+		return 0;
 
         aggregate = kmalloc(sizeof(aggregate)* 64, GFP_KERNEL);
-	if (!aggregate) 
-		return;
+	if (!aggregate) {
+		 pr_info("container-ima: allocation failed");
+		return 0;
+	}
 
-        fs = current->fs;
+	pathbuf = kmalloc(PATH_MAX, GFP_KERNEL);
+        if (!pathbuf) {
+	      pr_info("container-ima: allocation failed");
+              return 0;
+	}
 
-        check = ima_measure_image_fs(fs->pwd.dentry->d_parent, aggregate);
+
+	fs = current->fs;
+	res = d_path(pwd, pathbuf, PATH_MAX);
+	if (IS_ERR(res)){
+	        pr_err("Container IMA: absolute path fails \n");
+		goto cleanup;
+	}
+
+	if (!(strstr(res, "overlay")))
+		goto cleanup;
+
+
+        check = ima_measure_image_fs(root, res, aggregate);
 	if (check < 0) {
 		pr_err("Container IMA: image measurement failed\n");
-		return;
+		goto cleanup;
 	}
+
 
         hash.hdr.length = hash_digest_size[4];
         hash.hdr.algo =  4;
         memset(&hash.digest, 0, sizeof(hash.digest));
         length = sizeof(hash.hdr) + hash.hdr.length;
 
-        sprintf(ns_buf, "%u", ns);
-        aggregate = strncat(aggregate, ns_buf, 32);
-
 
         check = ima_calc_buffer_hash(aggregate, sizeof(aggregate), &hash.hdr);
         if (check < 0)
-                return;
+		goto cleanup;
 
-	tmp = ctx->ip;
-	ctx->ip = (unsigned long) ima_store_template;
-        ima_store_kprobe(fs->pwd.dentry->d_parent, ns, 4, &hash, length);
+        ima_store_kprobe(root, ns, 4, &hash, length);
 
-	ctx->ip = tmp;
+cleanup:
         kfree(aggregate);
+	kfree(pathbuf);
 
-        return;
-}
-
-int __kprobes handler_pre(struct kprobe *p, struct pt_regs *regs)
-{
         return 0;
 }
 
-static struct kprobe unshare_probe = {
-        .symbol_name = func_name,
-};
-
-/*
- * ima_store_measurement
- * 	struct ima_max_digest_data *hash: hash information
- * 	struct file *file: file measured
- * 	char *filename: name of measured file (ns:file path) 
- * 	int length: size of hash data
- * 	struct ima_template_desc *desc: description of IMA template
- * 	int hash_algo: algorithm used in measurement 
- *
- * 	Store file with namespaced measurement and file name
- * 	Extend to pcr 11
- */
-noinline int ima_store_measurement(struct ima_max_digest_data *hash, 
-		struct file *file, char *filename, int length, 
-		struct ima_template_desc *desc, int hash_algo)
-{
-
-	int i, check;
-	u64 i_version;
-	struct inode *inode;
-	struct ima_template_entry *entry;
-        struct integrity_iint_cache iint = {};
-
-	/* init inode integrity data */
-	inode = file->f_inode;
-	i_version = inode_query_iversion(inode);
-
-        iint.inode = inode;
-        iint.ima_hash = &hash->hdr;
-        iint.ima_hash->algo =  hash_algo;
-        iint.ima_hash->length = hash_digest_size[hash_algo];
-        iint.version = i_version;
-        
-	memcpy(hash->hdr.digest, hash->digest, sizeof(hash->digest));
-
-        memcpy(iint.ima_hash, hash, length);
-        
-	/* IMA event data */
-	struct ima_event_data event_data = { .iint = &iint,
-                                             .file = file,
-                                             .filename = filename
-                                           };
-
-	/* IMA template field data */
-        check = ima_alloc_init_template(&event_data, &entry, desc);
-        if (check < 0) {
-                return 0;
-        }
-
-	/* Store template, extend to PCR 11 */
-        check = ima_store_template(entry, 0, inode, filename, 11);
-        if ((!check || check == -EEXIST) && !(file->f_flags & O_DIRECT)) {
-                iint.flags |= IMA_MEASURED;
-                iint.measured_pcrs |= (0x1 << 11);
-                return 0;
-        }
-
-	/* Clean up if needed */
-        for (i = 0; i < entry->template_desc->num_fields; i++)
-                kfree(entry->template_data[i].data);
-
-        kfree(entry->digests);
-        kfree(entry);
-
-	return check;
-}
-
-/*
- * ima_file_measure
- * 	struct file *file: file to be measured
- * 	unsigned int ns: namespace 
- * 	struct ima_template_desc *decs: description of IMA template
- * 	
- * 	Measures file using ima_file_hash 
- * 	Namespaced measurements are as follows
- * 		HASH(measurement || NS) 
- * 	Measurements are logged with the format NS:file_path 
- */
-noinline int ima_file_measure(struct file *file, unsigned int ns, 
-		struct ima_template_desc *desc)
-{
-        int check, length, hash_algo;
-	char buf[64];
-	char *extend;
-	char *path;
-	char filename[128];
-	char ns_buf[128];
-        struct ima_max_digest_data hash;
-
-
-	/* Measure file */
-        hash_algo = ima_file_hash(file, buf, sizeof(buf));
-
-	path = ima_d_path(&file->f_path, &path, filename);
-	if (!path) {
-		return 0;
-	}
-	
-	/* Catch all for policy errors, todo */
-	if (path[0] != '/')
-		return 0;
-
-	sprintf(ns_buf, "%u", ns);
-	sprintf(filename, "%u:%s", ns, path);
-	
-	extend = strncat(buf, ns_buf, 32);
-
-	hash.hdr.length = hash_digest_size[hash_algo]; 
-        hash.hdr.algo =  hash_algo;
-        memset(&hash.digest, 0, sizeof(hash.digest));
-
-	length = sizeof(hash.hdr) + hash.hdr.length;
-	
-	/* Final measurement:
-	 * HASH(measurement || NS) 
-	 * Concatenate file measurement with the NS buffer
-	 * Hash the concatonated string */	
-	check = ima_calc_buffer_hash(extend, sizeof(extend), &hash.hdr);
-	if (check < 0)
-		return 0;
-	
-	check = ima_store_measurement(&hash, file, filename, length, 
-			desc, hash_algo);
-
-	return 0;
-}
-
-/*
- * bpf_process_measurement 
- * 	void *mem: pointer to struct ebpf_data to allow though verifier
- * 	int mem__sz: size of pointer 
- *
- * 	Function gets action from ima policy, measures, and stores
- * 	accordingly.
- * 	Exported by libbpf, called by eBPF program hooked to LSM (mmap_file)
- */
-noinline int bpf_process_measurement(void *mem, int mem__sz)
-{
-
-	int ret, action, pcr;
-	struct inode *inode;
-	struct mnt_idmap *idmap;
-	const struct cred *cred;
-	u32 secid;
-	struct ima_template_desc *desc = NULL;
-	unsigned int allowed_algos = 0;
-	struct ebpf_data *data = (struct ebpf_data *) mem;
-	struct file *file = data->file;
-	unsigned int ns = data->ns;
-	
-	if (!file || ns == 4026531838)
-		return 0;
-	
-	inode = file->f_inode;
-	if (!S_ISREG(inode->i_mode))
-                return 0;
-
-
-	security_current_getsecid_subj(&secid);
-
-	cred = current_cred();
-	if (!cred)
-		return 0;
-
-	idmap = file->f_path.mnt->mnt_idmap; 
-
-	/* Get action form IMA policy */
-	pcr = 10;
-	action = ima_get_action(idmap, inode, cred, secid, 
-			MAY_EXEC, MMAP_CHECK, &pcr, &desc, 
-			NULL, &allowed_algos);
-	if (!action)  
-		return 0;
-	
-	
-	if (action & IMA_MEASURE)
-		ret =  ima_file_measure(file, ns, desc);
-
-	
-	return 0;
-}
-
 BTF_SET8_START(ima_kfunc_ids)
-BTF_ID_FLAGS(func, bpf_process_measurement, KF_TRUSTED_ARGS | KF_SLEEPABLE)
-BTF_ID_FLAGS(func,  ima_file_measure, KF_TRUSTED_ARGS | KF_SLEEPABLE)
-BTF_ID_FLAGS(func,  ima_store_measurement, KF_TRUSTED_ARGS | KF_SLEEPABLE)
+BTF_ID_FLAGS(func, kprobe_measure_file, KF_TRUSTED_ARGS | KF_SLEEPABLE)
+BTF_ID_FLAGS(func, ima_store_kprobe, KF_TRUSTED_ARGS | KF_SLEEPABLE)
+BTF_ID_FLAGS(func,  bpf_image_measure, KF_TRUSTED_ARGS | KF_SLEEPABLE)
+BTF_ID_FLAGS(func, ima_measure_image_fs, KF_TRUSTED_ARGS | KF_SLEEPABLE)
 BTF_SET8_END(ima_kfunc_ids)
 
 static const struct btf_kfunc_id_set bpf_ima_kfunc_set = {
@@ -569,7 +392,14 @@ static int container_ima_init(void)
                 pr_err("Lookup fails\n");
                 return -1;
         }
-	
+
+	dentry_abspath = (char *(*)(const struct dentry *dentry, char *buf, int buflen))
+			kallsyms_lookup_name("dentry_path");
+	if (dentry_abspath == 0) {
+    		pr_err("Lookup fails\n");
+                return -1;
+        }
+
 	ima_get_action = (int (*)(struct mnt_idmap *, struct inode *, 
 				const struct cred *, u32,  int,  
 				enum ima_hooks,  int *, 
@@ -598,29 +428,12 @@ static int container_ima_init(void)
                 return -1;
         }
 
-	current_kprobe_ptr = (struct kprobe **) kallsyms_lookup_name("current_kprobe");
-	if (current_kprobe_ptr == NULL) {
-		pr_err("Lookup fails\n");
-                return -1;
-        }
-
-	unshare_probe.post_handler = handler_post;
-        unshare_probe.pre_handler = handler_pre;
-        ret = register_kprobe(&unshare_probe);
-        if (ret < 0) {
-                pr_err("kprobe registration fails %d\n", ret);
-                return -1;
-        }
-
-
-	return ret;
+	return 0;
 }
 
 static void container_ima_exit(void)
 {
 	pr_info("Exiting Container IMA\n");
-	synchronize_sched();
-        unregister_kprobe(&unshare_probe);
 	return;
 }
 
@@ -631,4 +444,5 @@ module_exit(container_ima_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION(MODULE_NAME);
 MODULE_AUTHOR("Avery Blanchard");
+
 
