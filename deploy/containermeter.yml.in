@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: containermeter
+  labels:
+    app: containermeter-label
+spec:
+  selector:
+    matchLabels:
+      app: containermeter-label
+  template:
+    metadata:
+      labels:
+        app: containermeter-label
+    spec:
+      containers:
+        - name: containermeter-installer
+          securityContext:
+            privileged: true
+          image: %%registry%%/containermeter:%%tag%%
+          imagePullPolicy: Always
+          volumeMounts:
+            - name: securityfs
+              mountPath: /sys/kernel/security
+      volumes:
+        - name: securityfs
+          hostPath:
+            path: /sys/kernel/security
+            type: Directory
