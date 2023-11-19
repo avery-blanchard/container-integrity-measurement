@@ -251,9 +251,11 @@ struct integrity_iint_cache {
 	struct ima_digest_data *ima_hash;
 };
 
+
 struct ebpf_data {
-        struct dentry *root;
-	struct path *pwd;
+        struct path *path;
+	char *dev_name;
+	char *type;
 	unsigned int ns;
 };
 

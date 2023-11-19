@@ -108,7 +108,7 @@ noinline char *kprobe_measure_file(struct file *file, char *aggregate)
  * 	Extend to pcr 11
  */
 noinline int ima_store_kprobe(struct dentry *root, unsigned int ns, int hash_algo,
-                struct ima_max_digest_data *hash, int length)
+			      struct ima_max_digest_data *hash, int length, const char * path, int filecount)
 {
 
         int i, check;
@@ -117,7 +117,7 @@ noinline int ima_store_kprobe(struct dentry *root, unsigned int ns, int hash_alg
         struct ima_template_entry *entry;
         struct integrity_iint_cache iint = {};
         struct ima_template_desc *desc = NULL;
-        char name[64];
+        char name[256];
         char *extend;
 
         inode = root->d_inode;
@@ -132,8 +132,7 @@ noinline int ima_store_kprobe(struct dentry *root, unsigned int ns, int hash_alg
         memcpy(hash->hdr.digest, hash->digest, sizeof(hash->digest));
         memcpy(iint.ima_hash, hash, length);
 
-
-        sprintf(name, "%u", ns);
+	snprintf(name, 254, "0x%x-%d-%s", ns, filecount, path ? path : "<nopath>");
 
         /* IMA event data */
         struct ima_event_data event_data = { .iint = &iint,
@@ -172,74 +171,102 @@ noinline int ima_store_kprobe(struct dentry *root, unsigned int ns, int hash_alg
  *
  * 	Traverse FS tree to measure all files
  */
-noinline int ima_measure_image_fs(struct dentry *root, char *pwd, char *root_hash) 
+noinline int ima_measure_image_fs(struct dentry *root, char *pwd, char *root_hash, int * pfilecounter) 
 {
 	int check, length;
 	struct file *file;
 	struct inode *inode;
 	struct dentry *cur;
 	char *pathbuf = NULL;
-        char *res = NULL;
-	char *abspath;
+    	char *res = NULL;
+	char *abspath = NULL;
 
-	if (!root) 
+	/* Docker: get abs path (pwd+dentry path) */
+	/*
+	abspath = kmalloc(PATH_MAX*2, GFP_KERNEL);
+    if (!abspath) {
+		pr_err("container-ima: %s: abspath allocation failed", pwd);
+        return -1;
+	}
+	*/
+
+	/* buffer for local (dentry) path */
+	/*
+	pathbuf = kmalloc(PATH_MAX, GFP_KERNEL);
+    if (!pathbuf) {
+		pr_err("container-ima: %s: pathbuf allocation failed", pwd);
+		kfree(abspath);
+    	return -1;
+	}
+    */
+
+	if (!root) {
+		pr_err("container-ima: %s: NULL dentry in directory", pwd);
+		/*kfree(pathbuf);
+		kfree(abspath);*/
 		return -1;
+	}
 
-        inode = d_real_inode(root);
-	if (!inode)
+	/*
+    inode = d_real_inode(root);
+	if (!inode) {
+		pr_err("container-ima: %s: failed to find inode", pwd);
+		kfree(pathbuf);
+		kfree(abspath);
 		return -1;
-	
-        pathbuf = kmalloc(PATH_MAX, GFP_KERNEL);
-        if (!pathbuf) 
-              return -1;
+	}
+	*/
 
-       	res = dentry_path_raw(root, pathbuf, PATH_MAX);
+	/*
+    res = dentry_path_raw(root, pathbuf, PATH_MAX);
 	if (IS_ERR(res) || !res) {
+		kfree(pathbuf);
+		kfree(abspath);
 		pr_err("container-ima: dentry_path_raw failed to retrieve path");
 		return -1;
 	}
-	kfree(pathbuf);
-	
-	/* Docker: get abs path (pwd+dentry path) */
-	abspath = kmalloc(PATH_MAX*2, GFP_KERNEL);
-        if (!abspath)
-              return -1;
+	*/
 
+	/* remove trailing slash from pwd */
+	/*
 	if (pwd[strlen(pwd)-1] == '/')
 		pwd[strlen(pwd)-1] = '\0';
-	
+		*/
+
+	/* merge pwd and res into abspath */
+	/*
 	length = (strlen(pwd)+strlen(res))+2;
 	check = snprintf(abspath, length, "%s%s", pwd, res);
 	if (check < 1) {
 		pr_err("container-ima: sprintf failed");
+		kfree(pathbuf);
+		kfree(abspath);
 		return -1;
+	}*/
+
+	if (d_is_dir(root)) {
+		pr_err("container-ima: measuring dir %s", root->d_name.name);
+	    list_for_each_entry(cur, &root->d_subdirs, d_child) {
+			ima_measure_image_fs(cur, abspath, root_hash, pfilecounter);
+		}
+	} else if (d_is_reg(root)) {
+		pr_err("container-ima: measuring file %s", root->d_name.name);
+		(*pfilecounter)++;
+/*		file = filp_open(abspath, O_RDONLY, 0);
+		if (!(IS_ERR(file))) {
+            root_hash = kprobe_measure_file(file, root_hash);
+			filp_close(file, 0);
+        }
+		*/
 	}
-	if (S_ISDIR(inode->i_mode)) {
-	       	list_for_each_entry(cur, &root->d_subdirs, d_child) {
-			ima_measure_image_fs(cur, pwd, root_hash);
-		 }
-	} else if (S_ISREG(inode->i_mode)) {
-			file = filp_open(abspath, O_RDONLY, 0);
-			if (!(IS_ERR(file))) {
-                                root_hash = kprobe_measure_file(file, root_hash);
-				filp_close(file, 0);
-                        }
-	}
-        kfree(abspath);
-	
+
+	/*kfree(pathbuf);
+    kfree(abspath);*/
 	return 0;
 
 
 }
-/*
- * handler_post
- * 	struct kprobe *p
- * 	struct pt_regs *ctx 
- * 	unsigned long flags
- *
- * 	Unshare kprobe handler. Provokes collection and storage of container image
- * 	measurement 
- */
+
 noinline int bpf_image_measure(void *mem, int mem__sz)
 {
         int check, length, hash_algo;
@@ -250,13 +277,14 @@ noinline int bpf_image_measure(void *mem, int mem__sz)
         char *aggregate;
         char ns_buf[128]; 
 	struct ebpf_data *data = (struct ebpf_data *) mem;
-	struct dentry *root = data->root;
-	struct path *pwd = data->pwd;
+	struct path *path = data->path;
+	char *dev_name = data->dev_name;
+	char *type = data->type;
 	unsigned int ns = data->ns;
 	long tmp;
 	char *pathbuf;
 	char *res;
-
+	int filecount=0;
 	
 	if (ns == init_task.nsproxy->uts_ns->ns.inum) 
 		return 0;
@@ -267,25 +295,23 @@ noinline int bpf_image_measure(void *mem, int mem__sz)
 		return 0;
 	}
 
-	pathbuf = kmalloc(PATH_MAX, GFP_KERNEL);
-        if (!pathbuf) {
-	      pr_info("container-ima: allocation failed");
-              return 0;
-	}
+	char *name;
+	char buf[256];
 
+	name = dentry_path_raw(path->dentry, buf, 256);
+
+	if (!dev_name)
+		return 0;
+
+	 pr_info("NS: %u, Path: %s,Mount:%s",ns,name,dev_name);
+
+
+	if (!strstr(dev_name, "merged"))
+		return 0;
 
 	fs = current->fs;
-	res = d_path(pwd, pathbuf, PATH_MAX);
-	if (IS_ERR(res)){
-	        pr_err("Container IMA: absolute path fails \n");
-		goto cleanup;
-	}
-
-	if (!(strstr(res, "overlay")))
-		goto cleanup;
-
-
-        check = ima_measure_image_fs(root, res, aggregate);
+	pr_info("Measuring container image: %s\n", res);
+        check = ima_measure_image_fs(path->dentry->d_parent, dev_name, aggregate, &filecount);
 	if (check < 0) {
 		pr_err("Container IMA: image measurement failed\n");
 		goto cleanup;
@@ -302,11 +328,10 @@ noinline int bpf_image_measure(void *mem, int mem__sz)
         if (check < 0)
 		goto cleanup;
 
-        ima_store_kprobe(root, ns, 4, &hash, length);
+        ima_store_kprobe(path->dentry, ns, 4, &hash, length, name, filecount);
 
 cleanup:
         kfree(aggregate);
-	kfree(pathbuf);
 
         return 0;
 }
@@ -444,5 +469,4 @@ module_exit(container_ima_exit);
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION(MODULE_NAME);
 MODULE_AUTHOR("Avery Blanchard");
-
 
