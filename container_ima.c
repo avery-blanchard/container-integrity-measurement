@@ -269,7 +269,7 @@ noinline int ima_measure_image_fs(struct dentry *root, char *pwd, char *root_has
 
 noinline int bpf_image_measure(void *mem, int mem__sz)
 {
-        int check, length, hash_algo;
+        int check, length, hash_algo, ret;
         struct task_struct *task;
         struct fs_struct *fs;
         unsigned long args;
@@ -306,11 +306,13 @@ noinline int bpf_image_measure(void *mem, int mem__sz)
 	 pr_info("NS: %u, Path: %s,Mount:%s",ns,name,dev_name);
 
 
-	if (!strstr(dev_name, "merged"))
-		return 0;
-
+	if (!strstr(name, "merged")) {
+		ret = 0;
+		goto cleanup;
+	} else {
+		ret = 1;
+	}
 	fs = current->fs;
-	pr_info("Measuring container image: %s\n", res);
         check = ima_measure_image_fs(path->dentry->d_parent, dev_name, aggregate, &filecount);
 	if (check < 0) {
 		pr_err("Container IMA: image measurement failed\n");
@@ -333,7 +335,7 @@ noinline int bpf_image_measure(void *mem, int mem__sz)
 cleanup:
         kfree(aggregate);
 
-        return 0;
+        return ret;
 }
 
 BTF_SET8_START(ima_kfunc_ids)

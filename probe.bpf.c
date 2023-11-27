@@ -16,6 +16,12 @@ struct ebpf_data {
 	char *type;
 	unsigned int ns;
 };
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, unsigned int);
+	__type(value, struct ebpf_data);
+	__uint(max_entries, 1000);
+} ns_map SEC(".maps");
 
 extern int bpf_image_measure(void *, int) __ksym;
 extern int fs_traverse(char *, unsigned int ns)  __ksym;
@@ -30,19 +36,26 @@ int BPF_PROG(mount_hook, const char *dev_name, const struct path *path,
 	 const char *type, unsigned long flags, void *data)
 {
     struct task_struct *task;
+    struct ebpf_data *stored;
     unsigned int ns;
     int ret;
 
     task = (void *) bpf_get_current_task();
     ns = BPF_CORE_READ(task, nsproxy, mnt_ns, ns.inum);
 
+    stored = bpf_map_lookup_elem(&ns_map, &ns);
+    if (stored) {
+	    ret = bpf_image_measure((void *) &stored, sizeof(&stored));
+    }
+    else {
+    	struct ebpf_data prog_data = { .path =path, .dev_name = dev_name, .type = type, .ns = ns };
 
-
-    struct ebpf_data prog_data = { .path =path, .dev_name = dev_name, .type = type, .ns = ns };
-
-    ret = bpf_image_measure((void *) &prog_data, 
+    	ret = bpf_image_measure((void *) &prog_data, 
 			sizeof(&prog_data));
 
+	if (ret == 1)
+		bpf_map_update_elem(&ns_map, &ns, &prog_data, BPF_ANY);
+    }
     return 0;
 
 }
