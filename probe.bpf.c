@@ -17,7 +17,7 @@ struct ebpf_data {
 	unsigned int ns;
 };
 struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(type, BPF_MAP_TYPE_HASH);
 	__type(key, unsigned int);
 	__type(value, struct ebpf_data);
 	__uint(max_entries, 1000);
@@ -46,15 +46,14 @@ int BPF_PROG(mount_hook, const char *dev_name, const struct path *path,
     stored = bpf_map_lookup_elem(&ns_map, &ns);
     if (stored) {
 	    ret = bpf_image_measure((void *) &stored, sizeof(&stored));
-    }
-    else {
-    	struct ebpf_data prog_data = { .path =path, .dev_name = dev_name, .type = type, .ns = ns };
+    } else {
+   	struct ebpf_data prog_data = { .path =path, .dev_name = dev_name, .type = type, .ns = ns };
 
     	ret = bpf_image_measure((void *) &prog_data, 
 			sizeof(&prog_data));
 
-	if (ret == 1)
-		bpf_map_update_elem(&ns_map, &ns, &prog_data, BPF_ANY);
+	/*if (ret == 1)
+		bpf_map_update_elem(&ns_map, &ns, (void *) &prog_data, BPF_ANY);*/
     }
     return 0;
 

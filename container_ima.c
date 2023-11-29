@@ -298,22 +298,20 @@ noinline int bpf_image_measure(void *mem, int mem__sz)
 	char *name;
 	char buf[256];
 
-	name = dentry_path_raw(path->dentry, buf, 256);
-
-	if (!dev_name)
-		return 0;
-
-	 pr_info("NS: %u, Path: %s,Mount:%s",ns,name,dev_name);
-
-
-	if (!strstr(name, "merged")) {
-		ret = 0;
-		goto cleanup;
-	} else {
-		ret = 1;
+	if (!path) {
+	       ret = 0;
+       	       goto cleanup;
 	}
-	fs = current->fs;
-        check = ima_measure_image_fs(path->dentry->d_parent, dev_name, aggregate, &filecount);
+
+	name = dentry_path_raw(path->dentry, buf, 256);
+	if (!name || !buf || !dev_name) {
+		ret= 0;
+		goto cleanup;
+	}
+
+	pr_info("NS: %u, Path: %s,Mount:%s",ns,name,dev_name);
+
+	check = ima_measure_image_fs(path->dentry->d_parent->d_parent, dev_name, aggregate, &filecount);
 	if (check < 0) {
 		pr_err("Container IMA: image measurement failed\n");
 		goto cleanup;
