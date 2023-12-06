@@ -254,7 +254,11 @@ struct integrity_iint_cache {
 struct ebpf_data {
         struct dentry *root;
 	struct path *pwd;
-	unsigned int ns;
+	unsigned int cgroup_ns;
+        unsigned int uts_ns;
+        unsigned int ipc_ns;
+        unsigned int pid_ns;
+	struct linux_binprm *bprm;
 };
 
 struct ima_max_digest_data {
